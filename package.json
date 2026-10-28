@@ -1,0 +1,68 @@
+{
+  "name": "beacon",
+  "productName": "Beacon",
+  "version": "0.3.7",
+  "private": true,
+  "description": "A desktop chat workspace with optional portable modules",
+  "author": "Beacon",
+  "license": "UNLICENSED",
+  "type": "module",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 8790 --strictPort",
+    "build": "vite build",
+    "start": "electron .",
+    "test": "node --test tests/*.test.mjs",
+    "test:desktop": "node tests/desktop-smoke.mjs",
+    "test:chats": "node tests/chat-desktop.mjs",
+    "package:win": "npm run build && electron-builder --win portable --x64",
+    "package:mac": "npm run build && electron-builder --mac dmg --x64",
+    "package:mac:universal": "npm run build && electron-builder --mac dmg --universal",
+    "package:dir": "npm run build && electron-builder --dir"
+  },
+  "dependencies": {
+    "@anthropic-ai/vertex-sdk": "0.19.11",
+    "google-auth-library": "^10.0.0",
+    "lucide-react": "^0.468.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-markdown": "^10.0.0",
+    "remark-gfm": "^4.0.0"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^6.0.0",
+    "electron": "44.4.5",
+    "electron-builder": "26.15.3",
+    "playwright": "^1.58.0",
+    "prettier": "^3.9.9",
+    "vite": "8.3.1"
+  },
+  "build": {
+    "appId": "internal.workteam.desktop",
+    "asar": true,
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*",
+      "shared/**/*",
+      "package.json"
+    ],
+    "artifactName": "Beacon-${version}-${os}-${arch}.${ext}",
+    "win": {
+      "target": [
+        "portable"
+      ],
+      "signExecutable": false
+    },
+    "mac": {
+      "target": [
+        "dmg"
+      ],
+      "category": "public.app-category.productivity",
+      "hardenedRuntime": true
+    },
+    "publish": null
+  }
+}
