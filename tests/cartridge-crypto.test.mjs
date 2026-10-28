@@ -1,0 +1,42 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import {encryptCartridge,decryptCartridge,encryptedCartridge} from '../electron/cartridge-crypto.mjs';
+import {createCartridgeImporter} from '../electron/cartridge-import.mjs';
+import {parseCartridge} from '../electron/modules.mjs';
+const module={format:'beacon-module',apiVersion:1,id:'fixture-private',name:'Fixture private',version:'1.0.0',description:'Synthetic private workflow',system:'Private fixture instructions',capability:'ssh-python-worker',python:'/usr/bin/python3',worker:'print("synthetic-only")',topics:[{id:'overview',name:'Overview',prompt:'Inspect synthetic data'}]};
+const bytes=Buffer.from(JSON.stringify(module)),password='synthetic-unlock-password';
+test('encrypted file hides module contents, authenticates data and preserves original module hash',async()=>{
+ const a=await encryptCartridge(bytes,password),b=await encryptCartridge(bytes,password);
+ assert.notDeepEqual(a,b);assert.ok(encryptedCartridge(a));
+ assert.ok(!a.includes(Buffer.from(module.system)));assert.ok(!a.includes(Buffer.from(module.id)));
+ const plain=await decryptCartridge(a,password);assert.deepEqual(plain,bytes);
+ assert.equal(parseCartridge(plain).hash,parseCartridge(bytes).hash);
+ await assert.rejects(decryptCartridge(a,'wrong-password'),/Could not unlock/);
+ const changed=JSON.parse(a);const data=Buffer.from(changed.data,'base64');data[0]^=1;changed.data=data.toString('base64');
+ await assert.rejects(decryptCartridge(Buffer.from(JSON.stringify(changed)),password),/Could not unlock/);
+ const header=JSON.parse(a);header.kdf='scrypt-999999999';
+ assert.throws(()=>encryptedCartridge(Buffer.from(JSON.stringify(header))),/Unsupported/);
+ await assert.rejects(encryptCartridge(bytes,'short'),/12 characters/);
+});
+test('wrong password and cancelled trust never install; unlock is memory-only and retryable',async()=>{
+ let installed=0,approved=false;
+ const importer=createCartridgeImporter({approve:async()=>approved,install:async p=>{assert.deepEqual(p,bytes);installed++;return {installed:true};}});
+ let pending=await importer.begin(await encryptCartridge(bytes,password));
+ assert.equal(pending.needsUnlock,true);
+ await assert.rejects(importer.unlock({token:pending.token,password:'wrong'}),/Could not unlock/);
+ assert.equal(installed,0);
+ assert.equal(await importer.unlock({token:pending.token,password}),null);assert.equal(installed,0);
+ approved=true;pending=await importer.begin(await encryptCartridge(bytes,password));
+ assert.deepEqual(await importer.unlock({token:pending.token,password}),{installed:true});assert.equal(installed,1);
+ await assert.rejects(importer.unlock({token:pending.token,password}),/expired/);
+ pending=await importer.begin(await encryptCartridge(bytes,password));importer.cancel(pending.token);
+ await assert.rejects(importer.unlock({token:pending.token,password}),/expired/);
+ await importer.begin(Buffer.from(bytes));assert.equal(installed,2);
+});
+test('cancelling while decryption runs cannot present trust or install',async()=>{
+ let approvals=0;
+ const importer=createCartridgeImporter({approve:async()=>{approvals++;return true;},install:async()=>assert.fail('cancelled import')});
+ const pending=await importer.begin(await encryptCartridge(bytes,password));
+ const work=importer.unlock({token:pending.token,password});importer.cancel(pending.token);
+ assert.equal(await work,null);assert.equal(approvals,0);
+});
