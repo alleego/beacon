@@ -22,7 +22,7 @@ may require approval in macOS security settings.
 On RHEL 9, install the downloaded RPM with:
 
 ```sh
-sudo dnf install ./Beacon-0.4.0-linux-x64.rpm
+sudo dnf install ./Beacon-0.4.0-linux-x86_64.rpm
 ```
 
 Use a graphical desktop session with an available, unlocked keyring. Beacon
