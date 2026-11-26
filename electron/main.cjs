@@ -34,7 +34,10 @@ let mainWindow,
   conversations,
   sendConversation,
   conversationRequest,
-  investigations;
+  investigations,
+  notesArchive,
+  usageArchive;
+let usageFault = "";
 const backgroundRequests = new Set();
 const primaryInstance = app.requestSingleInstanceLock();
 if (!primaryInstance) app.quit();
@@ -49,6 +52,29 @@ const root = () => app.getPath("userData");
 const file = (name) => path.join(root(), name);
 const indexPath = path.join(__dirname, "../dist/index.html");
 const indexUrl = pathToFileURL(indexPath).href;
+
+function encryptedStorageAvailable() {
+  return safeStorage.isEncryptionAvailable() &&
+    !(process.platform === "linux" && safeStorage.getSelectedStorageBackend() === "basic_text");
+}
+async function readEncrypted(name) {
+  try {
+    if ((await fs.stat(file(name))).size > 40 * 1024 * 1024) throw new Error("Archive is too large.");
+    if (!encryptedStorageAvailable()) throw new Error("OS encrypted storage unavailable.");
+    return JSON.parse(safeStorage.decryptString(await fs.readFile(file(name))));
+  } catch (e) {
+    if (e.code === "ENOENT") return null;
+    throw new Error(`Could not unlock ${name}. Original data has not been changed.`);
+  }
+}
+async function writeEncrypted(name, value) {
+  if (!encryptedStorageAvailable()) throw new Error("OS encrypted storage is unavailable. Nothing was saved in plaintext.");
+  const temp = file(`${name}.${randomUUID()}.tmp`);
+  try {
+    await fs.writeFile(temp, safeStorage.encryptString(JSON.stringify(value)), {mode: 0o600});
+    await fs.rename(temp, file(name));
+  } finally { await fs.rm(temp, {force: true}).catch(() => {}); }
+}
 
 async function readJSON(name, fallback) {
   try {
@@ -74,7 +100,7 @@ async function decryptCredential() {
     if (e.code === "ENOENT") return null;
     throw e;
   }
-  if (!safeStorage.isEncryptionAvailable())
+  if (!encryptedStorageAvailable())
     throw new Error("OS credential storage is unavailable.");
   const { parseCredential } = await import("./credentials.mjs");
   credentialLoaded = parseCredential(safeStorage.decryptString(bytes));
@@ -129,14 +155,22 @@ async function runProvider(messages, options = {}, backgroundSignal) {
     const credential = await decryptCredential();
     if (!credential)
       throw new Error("Import your own Vertex credential first.");
+    if (controller.signal.aborted) throw new Error("Request cancelled. Nothing was retried.");
+    const usageId = randomUUID();
+    const begun = await usageArchive.action({type: "begin", id: usageId, at: new Date().toISOString(), kind: options.usageKind || (backgroundSignal ? "module" : "chat")});
+    if (begun.storageError) throw new Error("Usage could not be saved. No model request was sent.");
     try {
-      return await provider.requestClaude(
+      const response = await provider.requestClaude(
         credential,
         messages,
         controller.signal,
         options,
       );
+      try { await usageArchive.action({type: "finish", id: usageId, usage: response.usage}); }
+      catch { usageFault = "A completed request could not be recorded. Usage totals are incomplete."; }
+      return response;
     } catch (e) {
+      await usageArchive.action({type: "finish", id: usageId}).catch(() => { usageFault = "Usage recording failed. Totals may be incomplete."; });
       if (controller.signal.aborted) throw new Error("Request cancelled. Nothing was retried.");
       throw new Error(provider.providerError(e));
     }
@@ -185,12 +219,17 @@ async function createWindow() {
       await investigations?.shutdown();
       for (const controller of backgroundRequests) controller.abort();
       await conversations.idle();
+      await notesArchive.idle();
+      await usageArchive.idle();
       const snapshot = await conversations.snapshot();
-      if (snapshot.storageError) {
+      const notesState = await notesArchive.snapshot();
+      const usageState = await usageArchive.snapshot();
+      const unsaved = snapshot.storageError || notesState.storageError || usageState.storageError;
+      if (unsaved) {
         const result = await dialog.showMessageBox(mainWindow, {
           type: "warning",
-          title: "Unsaved response",
-          message: snapshot.storageError,
+          title: "Unsaved changes",
+          message: unsaved,
           buttons: ["Keep Beacon open", "Close anyway"],
           defaultId: 0,
           cancelId: 0,
@@ -237,7 +276,7 @@ if (primaryInstance)
               MAX_WORKSPACE_BYTES + 1024 * 1024
             )
               throw new Error();
-            if (!safeStorage.isEncryptionAvailable()) throw new Error();
+            if (!encryptedStorageAvailable()) throw new Error();
             return JSON.parse(
               safeStorage.decryptString(
                 await fs.readFile(file("conversations.encrypted")),
@@ -251,7 +290,7 @@ if (primaryInstance)
           }
         },
         write: async (value) => {
-          if (!safeStorage.isEncryptionAvailable())
+          if (!encryptedStorageAvailable())
             throw new Error(
               "OS encrypted storage is unavailable. Chats were not saved.",
             );
@@ -269,9 +308,30 @@ if (primaryInstance)
         },
       });
       await fs.mkdir(root(), { recursive: true });
-      settings = domain.validateSettings(
-        await readJSON("settings.json", domain.DEFAULT_SETTINGS),
-      );
+      const savedSettings = await readJSON("settings.json", domain.DEFAULT_SETTINGS);
+      settings = domain.validateSettings({ ...savedSettings,
+        tutorialStatus: savedSettings.tutorialStatus || (savedSettings.onboarded ? "dismissed" : "new"),
+      });
+      const {createLocalArchive} = await import("./local-archive.mjs");
+      const notesDomain = await import("../shared/notes.mjs");
+      const usageDomain = await import("../shared/usage.mjs");
+      notesArchive = createLocalArchive({
+        read: () => readEncrypted("notes.encrypted"),
+        write: value => writeEncrypted("notes.encrypted", value),
+        initial: async () => notesDomain.newNotes(await readJSON("notes.json", [])),
+        validate: notesDomain.validateNotes, reduce: notesDomain.changeNotes,
+      });
+      usageArchive = createLocalArchive({
+        read: () => readEncrypted("usage.encrypted"),
+        write: value => writeEncrypted("usage.encrypted", value),
+        initial: usageDomain.newUsage, validate: usageDomain.validateUsage, reduce: usageDomain.changeUsage,
+      });
+      await notesArchive.snapshot();
+      const usageState = await usageArchive.snapshot();
+      if (usageState.events.some(e => e.status === "pending")) await usageArchive.action({type: "recover"});
+      register("notes", () => notesArchive.snapshot());
+      register("notes-action", input => notesArchive.action(input));
+      register("usage", async () => ({...await usageArchive.snapshot(), warning: usageFault}));
       const { createInvestigations } = await import("./investigations.mjs");
       investigations = createInvestigations({
         chats: conversations,
@@ -279,12 +339,12 @@ if (primaryInstance)
         read: async () => {
           try {
             const saved = await fs.readFile(file("modules.encrypted"));
-            if (!safeStorage.isEncryptionAvailable()) throw new Error("OS encrypted storage unavailable.");
+            if (!encryptedStorageAvailable()) throw new Error("OS encrypted storage unavailable.");
             return JSON.parse(safeStorage.decryptString(saved));
           } catch (e) { if (e.code === "ENOENT") return null; throw e; }
         },
         write: async (value) => {
-          if (!safeStorage.isEncryptionAvailable()) throw new Error("OS encrypted storage unavailable.");
+          if (!encryptedStorageAvailable()) throw new Error("OS encrypted storage unavailable.");
           const text = JSON.stringify(value);
           if (text.length > 32 * 1024 * 1024) throw new Error("Module storage is full.");
           const temp = file(`modules.${randomUUID()}.tmp`);
@@ -298,7 +358,10 @@ if (primaryInstance)
       const cartridgeImporter = createCartridgeImporter({
         install: bytes => investigations.install(bytes),
         approve: async m => {
-          const approval = await dialog.showMessageBox(mainWindow, {type: "warning", title: "Trust this module?", message: `${m.name} ${m.version}`, detail: `${m.description}\n\nThis module can run its bundled Python worker through your configured SSH account and send collected evidence to your Vertex project. Import only from a trusted author. Modules are not sandboxed on the remote host.\n\nSHA-256: ${m.hash}`, buttons: ["Cancel", "Trust and import"], defaultId: 0, cancelId: 0});
+          const execution = m.capability === "local-node-worker"
+            ? "This module can run bundled code on this computer with your account's permissions and send collected evidence to your configured model provider. It is not sandboxed. Import only from a trusted author. Setup is required before use."
+            : "This module can run its bundled Python worker through your configured SSH account and send collected evidence to your Vertex project. Import only from a trusted author. Modules are not sandboxed on the remote host.";
+          const approval = await dialog.showMessageBox(mainWindow, {type: "warning", title: "Trust this module?", message: `${m.name} ${m.version}`, detail: `${m.description}\n\n${execution}\n\nSHA-256: ${m.hash}`, buttons: ["Cancel", "Trust and import"], defaultId: 0, cancelId: 0});
           return approval.response === 1;
         },
       });
@@ -332,7 +395,8 @@ if (primaryInstance)
       register("bootstrap", async () => ({
         settings,
         connection: await connectionStatus(),
-        notes: await readJSON("notes.json", []),
+        notes: await notesArchive.snapshot(),
+        usage: await usageArchive.snapshot(),
         workspace: await conversations.snapshot(),
         provider: domain.PROVIDER,
         desktop: true,
@@ -348,7 +412,7 @@ if (primaryInstance)
           throw new Error(
             "Wait for the current request before replacing credentials.",
           );
-        if (!safeStorage.isEncryptionAvailable())
+        if (!encryptedStorageAvailable())
           throw new Error(
             "OS encrypted storage is unavailable. No credential was saved.",
           );
@@ -382,7 +446,7 @@ if (primaryInstance)
       register("test-connection", async () => {
         await runProvider([
           { role: "user", content: "Reply with only: Connection ready." },
-        ]);
+        ], {usageKind: "connection"});
         return { tested: true, testedAt: new Date().toISOString() };
       });
       register("workspace", () => conversations.snapshot());
@@ -397,8 +461,9 @@ if (primaryInstance)
           const next = await sendConversation(conversations, input, async (messages) => {
             if (request.cancelled) throw new Error("Request cancelled. Nothing was retried.");
             const modules = await investigations.enabled();
-            const system = modules.map(m => m.package.system).join("\n") + "\n" + await investigations.context(input.chatId);
-            const response = await runProvider(messages, {system, tools: await investigations.tools()});
+            const investigationContext = await investigations.context(input.chatId);
+            const system = modules.map(m => m.package.system).join("\n") + "\n" + investigationContext;
+            const response = await runProvider(messages, {system, tools: await investigations.tools(), usageKind: investigationContext ? "module" : "chat"});
             if (response.calls?.length) {
               if (response.calls.length !== 1 || response.calls[0].name !== "start_investigation") throw new Error("Unsupported workflow request.");
               const target = response.calls[0].input?.target;
@@ -438,41 +503,6 @@ if (primaryInstance)
           choice.filePaths[0],
         );
         return libraryModule.loadLibrary(file("knowledge"));
-      });
-      register("save-note", async (input) => {
-        if (
-          !input ||
-          typeof input.title !== "string" ||
-          !input.title.trim() ||
-          input.title.length > 160 ||
-          typeof input.body !== "string" ||
-          input.body.length > 20000 ||
-          typeof input.source !== "string" ||
-          input.source.length > 2000
-        )
-          throw new Error(
-            "Enter a title and keep the note under 20,000 characters.",
-          );
-        const notes = await readJSON("notes.json", []);
-        const existing = input.id && notes.find((n) => n.id === input.id);
-        if (input.id && !existing) throw new Error("The note was not found.");
-        const note = {
-          id: existing?.id || randomUUID(),
-          title: input.title.trim(),
-          body: input.body,
-          source: input.source,
-          status: ["observation", "hypothesis", "verified"].includes(
-            input.status,
-          )
-            ? input.status
-            : "observation",
-          updatedAt: new Date().toISOString(),
-        };
-        const next = existing
-          ? notes.map((n) => (n.id === note.id ? note : n))
-          : [note, ...notes];
-        await writeJSON("notes.json", next);
-        return next;
       });
       register("export-chat", async (text) => {
         if (typeof text !== "string" || text.length > 100000)

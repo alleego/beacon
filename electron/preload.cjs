@@ -14,7 +14,7 @@ const channels = [
   "cancel",
   "library",
   "import-spec",
-  "save-note",
+  "notes", "notes-action", "usage",
   "export-chat",
   "open-link",
   "copy",

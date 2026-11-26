@@ -1,11 +1,21 @@
 import { randomUUID } from "node:crypto";
-import { parseCartridge, validateConnection, workflowTools } from "./modules.mjs";
+import { parseCartridge, validateConnection, workflowTools, isLocalModule, moduleReady } from "./modules.mjs";
 import { remoteWorker } from "./remote-worker.mjs";
+import { localWorker, localAccess } from "./local-worker.mjs";
 import { checkAccess } from "./access-check.mjs";
 import { newChat, validateWorkspace } from "../shared/conversations.mjs";
 
 const stamp = () => new Date().toISOString();
 const terminal = new Set(["ready", "stopped", "error", "interrupted", "awaiting-selection"]);
+function validateEvidence(records) {
+  if (!Array.isArray(records) || !records.length || records.length > 40 || JSON.stringify(records).length > 500000 ||
+      records.some(e => typeof e.id !== "string" || typeof e.text !== "string" || typeof e.source !== "string" ||
+        typeof e.collectedAt !== "string" || (e.title !== undefined && (typeof e.title !== "string" || e.title.length > 200)) ||
+        (e.group !== undefined && (typeof e.group !== "string" || e.group.length > 80)) ||
+        (e.state !== undefined && !["captured", "empty", "command-error", "not-found"].includes(e.state))))
+    throw new Error("Worker returned invalid evidence.");
+  return records;
+}
 function sourceChoices(report) {
   if (!Array.isArray(report.sources) || report.sources.length > 64) throw new Error("Invalid snapshot choices.");
   const ids = new Set();
@@ -26,7 +36,8 @@ export function evidenceContext(records, budget) {
     collectedAt: e.collectedAt, title: e.title, group: e.group, state: e.state,
     text: e.text.slice(0, allowance), contextTruncated: e.text.length > allowance })));
 }
-export function createInvestigations({ read, write, chats, ask, collect = remoteWorker, probe = checkAccess }) {
+export function createInvestigations({ read, write, chats, ask,
+  collect = (m, ...args) => (isLocalModule(m) ? localWorker : remoteWorker)(m, ...args), probe = checkAccess }) {
   let state, queue = Promise.resolve();
   const running = new Map();
   const access = new Map();
@@ -39,13 +50,13 @@ export function createInvestigations({ read, write, chats, ask, collect = remote
   }
   async function testAccess(id) {
     const m = (await transaction()).modules.find(m => m.package.id === id);
-    if (!m?.enabled || !m.connection) throw new Error("Enable and save the module connection first.");
+    if (!m?.enabled || !moduleReady(m)) throw new Error("Enable and complete the module setup first.");
     const previous = access.get(id);
     if (previous?.task) return previous.task;
     if (previous?.result?.checkedAt && Date.now() - Date.parse(previous.result.checkedAt) < 5000) return previous.result;
     const entry = {controller:new AbortController(), result:{state:"checking", message:"Checking SSH access…"}};
     access.set(id, entry);
-    entry.task = Promise.resolve().then(() => probe(m.connection, entry.controller.signal))
+    entry.task = Promise.resolve().then(() => isLocalModule(m.package) ? localAccess(m.package) : probe(m.connection, entry.controller.signal))
       .catch(() => ({state:"failed", message:"Access check failed. Check your SSH setup.", checkedAt:stamp()}))
       .then(result => { if (access.get(id) === entry) { entry.result = result; entry.task = null; } return result; });
     return entry.task;
@@ -84,8 +95,11 @@ export function createInvestigations({ read, write, chats, ask, collect = remote
       storageError: s.storageError || "",
       modules: s.modules.map(({ package: m, enabled, connection }) => ({
         id: m.id, name: m.name, version: m.version, description: m.description, hash: m.hash, enabled, connection, access: accessStatus(m.id),
+        capability: m.capability, platform: m.platform, setup: isLocalModule(m) ? m.setup : undefined,
+        supported: !isLocalModule(m) || m.platform === process.platform,
+        setupComplete: s.modules.find(x => x.package.id === m.id)?.setupHash === m.hash,
       })),
-      jobs: s.jobs.map(({ evidence, ...j }) => ({ ...j, evidenceCount: evidence?.length || 0 })),
+      jobs: s.jobs.map(({ evidence, previewEvidence, ...j }) => ({ ...j, evidenceCount: evidence?.length || 0, previewCount: previewEvidence?.length || 0 })),
     };
   }
   async function enabled() { return (await transaction()).modules.filter(m => m.enabled); }
@@ -108,16 +122,23 @@ export function createInvestigations({ read, write, chats, ask, collect = remote
       if ([...running.values()].some(x => x.moduleId === m.id)) throw new Error("Stop this module's investigations before updating it.");
       const old = s.modules.find(x => x.package.id === m.id);
       if (old) old.package = m;
-      else s.modules.push({ package: m, enabled: true, connection: null });
+      else s.modules.push({ package: m, enabled: !isLocalModule(m), connection: null });
     });
     forgetAccess(m.id);
     return snapshot();
   }
-  async function configure({ id, enabled: on, connection }) {
+  async function configure({ id, enabled: on, connection, setupComplete }) {
     await transaction(s => {
       const m = s.modules.find(x => x.package.id === id);
       if (!m) throw new Error("Module was not found.");
-      if (connection) m.connection = validateConnection(connection);
+      if (isLocalModule(m.package)) {
+        if (connection) throw new Error("Local modules do not use SSH settings.");
+        if (setupComplete === true) {
+          if (m.package.platform !== process.platform) throw new Error("This module requires macOS on this computer.");
+          m.setupHash = m.package.hash;
+        }
+        if (on === true && !moduleReady(m)) throw new Error("Complete this module's setup first.");
+      } else if (connection) m.connection = validateConnection(connection);
       if (typeof on === "boolean") m.enabled = on;
     });
     forgetAccess(id);
@@ -128,7 +149,7 @@ export function createInvestigations({ read, write, chats, ask, collect = remote
     if (!/^[A-Za-z0-9][A-Za-z0-9_.-]{0,79}$/.test(input.target) || !["quick", "deep"].includes(input.depth))
       throw new Error("Invalid investigation target or depth.");
     const m = (await enabled()).find(m => m.package.id === input.moduleId);
-    if (!m?.connection) throw new Error("Import and configure this module in Settings first.");
+    if (!moduleReady(m)) throw new Error("Import and complete this module's setup in Settings first.");
     const ws = await chats.snapshot();
     if (!ws.chats.some(c => c.id === chatId)) throw new Error("The chat no longer exists.");
     const id = randomUUID();
@@ -145,7 +166,7 @@ export function createInvestigations({ read, write, chats, ask, collect = remote
     const s = await transaction(), job = s.jobs.find(j => j.id === id);
     if (!job) throw new Error("Investigation was not found.");
     const m = s.modules.find(m => m.enabled && m.package.id === job.moduleId);
-    if (!m?.connection) throw new Error("Enable and configure the original module first.");
+    if (!moduleReady(m)) throw new Error("Enable and complete the original module setup first.");
     if (m.package.hash !== job.moduleHash) throw new Error("This job needs its original cartridge version. Reimport that version to resume.");
     if (sourceId !== undefined) {
       if (job.evidence) throw new Error("Use Inspect in a new chat to change a completed collection.");
@@ -197,22 +218,16 @@ export function createInvestigations({ read, write, chats, ask, collect = remote
       if (report.sources) {
         sources = sourceChoices(report);
         if (report.selectionRequired) {
-          await patch(id, { sources, status: "awaiting-selection", message: String(report.note || "Choose a snapshot.").slice(0, 2000) });
+          await patch(id, { sources, status: "awaiting-selection", message: String(report.note || "Choose a snapshot.").slice(0, 2000),
+            ...(report.preview ? {previewEvidence: validateEvidence(report.preview)} : {}) });
           return;
         }
         selectedSource = sources.find(s => s.id === report.selectedSource?.id);
         if (!selectedSource || selectedSource.incompletePart || (job.sourceId && selectedSource.id !== job.sourceId))
           throw new Error("Worker returned a different or invalid snapshot.");
       } else if (report.selectionRequired || job.sourceId) throw new Error("Worker did not confirm snapshot selection.");
-      if (!Array.isArray(report.evidence) || !report.evidence.length || report.evidence.length > 40 ||
-          JSON.stringify(report.evidence).length > 500000 ||
-          report.evidence.some(e => typeof e.id !== "string" || typeof e.text !== "string" ||
-            typeof e.source !== "string" || typeof e.collectedAt !== "string" ||
-            (e.title !== undefined && (typeof e.title !== "string" || e.title.length > 200)) ||
-            (e.group !== undefined && (typeof e.group !== "string" || e.group.length > 80)) ||
-            (e.state !== undefined && !["captured", "empty", "command-error", "not-found"].includes(e.state))))
-        throw new Error("Worker returned invalid evidence.");
-      await patch(id, { evidence: report.evidence, collectionNote: String(report.note || "").slice(0, 4000),
+      validateEvidence(report.evidence);
+      await patch(id, { evidence: report.evidence, previewEvidence: undefined, collectionNote: String(report.note || "").slice(0, 4000),
         ...(sources ? { sources, selectedSource, sourceId: selectedSource.id } : {}) });
     }
     job = (await transaction()).jobs.find(j => j.id === id);
@@ -285,7 +300,7 @@ export function createInvestigations({ read, write, chats, ask, collect = remote
     if (!job || running.has(id)) throw new Error("Wait for this investigation to finish or stop it first.");
     if (!job.sources?.some(s => s.id === sourceId && !s.incompletePart)) throw new Error("Choose an available snapshot.");
     const m = (await enabled()).find(m => m.package.id === job.moduleId);
-    if (!m?.connection || m.package.hash !== job.moduleHash) throw new Error("Enable the original cartridge version first.");
+    if (!moduleReady(m) || m.package.hash !== job.moduleHash) throw new Error("Enable the original cartridge version first.");
     const chatId = randomUUID();
     await chats.internal(ws => {
       const chat = newChat(null, stamp(), chatId);
@@ -302,7 +317,10 @@ export function createInvestigations({ read, write, chats, ask, collect = remote
     running.get(id)?.controller.abort();
     await patch(id, { status: "stopped", message: "Stopped. Saved evidence and completed replies are retained." });
   }
-  async function evidence(id) { return (await transaction()).jobs.find(j => j.id === id)?.evidence || []; }
+  async function evidence(id) {
+    const job = (await transaction()).jobs.find(j => j.id === id);
+    return job?.evidence || job?.previewEvidence || [];
+  }
   async function handoff(id) {
     const j = (await transaction()).jobs.find(j => j.id === id);
     if (!j) throw new Error("Investigation not found.");

@@ -58,6 +58,8 @@ export async function requestClaude(
     usage: {
       input: response.usage.input_tokens,
       output: response.usage.output_tokens,
+      cacheRead: response.usage.cache_read_input_tokens || 0,
+      cacheWrite: response.usage.cache_creation_input_tokens || 0,
     },
     truncated: response.stop_reason === "max_tokens",
   };
