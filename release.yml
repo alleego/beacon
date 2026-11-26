@@ -1,0 +1,85 @@
+name: Build installers
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish installers as a new release
+        required: true
+        type: boolean
+        default: false
+permissions:
+  contents: read
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15-intel
+            target: mac
+            extension: dmg
+          - runner: ubuntu-22.04
+            target: linux
+            extension: rpm
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Install Linux packaging tools
+        if: matrix.target == 'linux'
+        run: sudo apt-get update && sudo apt-get install --no-install-recommends -y rpm
+      - run: npm ci --no-audit --no-fund
+      - name: Build installer
+        run: npm run package:${{ matrix.target }}
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      - name: Check packaged file boundary
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          import {listPackage} from '@electron/asar';
+          const candidates = ['release/mac/Beacon.app/Contents/Resources/app.asar', 'release/linux-unpacked/resources/app.asar'];
+          const archive = candidates.find(p => fs.existsSync(p));
+          if (!archive) throw new Error('Packaged application not found');
+          const files = listPackage(archive);
+          if (files.some(p => /\.beacon-module$|\.encrypted$|[\\/]\.ssh[\\/]|[\\/]test-results[\\/]/i.test(p)))
+            throw new Error('Unexpected private artifact in application');
+          console.log('Packaged application boundary checked.');
+          NODE
+      - name: Check RPM metadata
+        if: matrix.target == 'linux'
+        run: rpm -qp --queryformat '%{NAME} %{VERSION} %{ARCH}\n' release/*.rpm
+      - uses: actions/upload-artifact@v4
+        with:
+          name: beacon-${{ matrix.target }}
+          path: release/*.${{ matrix.extension }}
+          if-no-files-found: error
+  release:
+    if: inputs.publish
+    needs: build
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: beacon-*
+          path: installers
+          merge-multiple: true
+      - name: Publish new version
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=$(node -p 'require("./package.json").version')
+          test "$version" = '0.4.0'
+          if gh release view "v$version" >/dev/null 2>&1; then
+            echo 'This version already has a release; refusing to replace it.'
+            exit 1
+          fi
+          test "$(find installers -maxdepth 1 -type f | wc -l)" -eq 2
+          (cd installers && sha256sum *.dmg *.rpm > SHA256SUMS.txt)
+          gh release create "v$version" installers/* --target "$GITHUB_SHA" --title "Beacon $version" --notes-file RELEASE_NOTES.md
