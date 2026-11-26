@@ -1,11 +1,12 @@
 {
   "name": "beacon",
   "productName": "Beacon",
-  "version": "0.3.7",
+  "version": "0.4.0",
   "private": true,
   "description": "A desktop chat workspace with optional portable modules",
   "author": "Beacon",
   "license": "UNLICENSED",
+  "homepage": "https://github.com/alleego/beacon",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
@@ -18,10 +19,16 @@
     "package:win": "npm run build && electron-builder --win portable --x64",
     "package:mac": "npm run build && electron-builder --mac dmg --x64",
     "package:mac:universal": "npm run build && electron-builder --mac dmg --universal",
+    "package:linux": "npm run build && electron-builder --linux rpm --x64",
     "package:dir": "npm run build && electron-builder --dir"
   },
   "dependencies": {
     "@anthropic-ai/vertex-sdk": "0.19.11",
+    "@tiptap/extension-task-item": "3.35.0",
+    "@tiptap/extension-task-list": "3.35.0",
+    "@tiptap/pm": "3.35.0",
+    "@tiptap/react": "3.35.0",
+    "@tiptap/starter-kit": "3.35.0",
     "google-auth-library": "^10.0.0",
     "lucide-react": "^0.468.0",
     "react": "^19.0.0",
@@ -61,7 +68,18 @@
         "dmg"
       ],
       "category": "public.app-category.productivity",
-      "hardenedRuntime": true
+      "hardenedRuntime": true,
+      "extendInfo": {
+        "NSAppleEventsUsageDescription": "Allow enabled modules to interact with applications you authorize."
+      }
+    },
+    "linux": {
+      "target": ["rpm"],
+      "category": "Utility",
+      "maintainer": "Beacon"
+    },
+    "rpm": {
+      "depends": ["gtk3", "libnotify", "nss", "libXScrnSaver", "libXtst", "xdg-utils", "at-spi2-core", "libuuid", "alsa-lib", "libdrm", "mesa-libgbm", "libsecret", "gnome-keyring"]
     },
     "publish": null
   }
