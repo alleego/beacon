@@ -30,11 +30,14 @@ import {
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { DEFAULT_SETTINGS, PROVIDER, safeLink } from "../shared/domain.mjs";
+import { DEFAULT_SETTINGS, PROVIDER, safeLink, shouldSendOnEnter } from "../shared/domain.mjs";
 import { api } from "./bridge";
 import Library from "./Library";
 import { Modules, Investigations, ModuleAccess } from "./Modules";
 import ChatNavigation, { ChatDialog } from "./ChatNavigation";
+import Notes from "./Notes";
+import Usage, { UsageBadge } from "./Usage";
+import QuickStart, { QuickStartSettings } from "./QuickStart";
 
 const APP_VERSION = __APP_VERSION__;
 const EMPTY_MESSAGES = [];
@@ -76,6 +79,7 @@ function Modal({ title, children, onClose, className = "" }) {
   return (
     <dialog
       ref={ref}
+      aria-label={title}
       className={`modal ${className}`}
       onCancel={(e) => {
         e.preventDefault();
@@ -231,12 +235,17 @@ function SettingsPanel({
   run,
   busy,
   desktop,
+  initialTab = "Appearance",
+  usageData,
+  onTutorial,
+  onResetTutorial,
+  onContinueTutorial,
 }) {
-  const [tab, setTab] = useState("Appearance");
+  const [tab, setTab] = useState(initialTab);
   return (
     <Modal title="Settings" onClose={onClose} className="settings-modal">
       <div className="modal-tabs" role="tablist">
-        {["Appearance", "Profile", "Connection", "Modules", "Local data"].map((t) => (
+        {["Appearance", "Behavior", "Usage", "Profile", "Connection", "Modules", "Local data"].map((t) => (
           <button
             role="tab"
             aria-selected={tab === t}
@@ -360,6 +369,13 @@ function SettingsPanel({
             </p>
           </>
         )}
+        {tab === "Behavior" && <>
+          <label className="field">Enter key<select aria-label="Enter key" value={settings.enterBehavior} onChange={e => onSave({...settings,enterBehavior:e.target.value})}><option value="newline">Create a new line</option><option value="send">Send the message</option></select></label>
+          <hr/><h3>Quick start</h3>
+          <QuickStartSettings onReplay={onTutorial} onReset={onResetTutorial}/>
+          {settings.tutorialStatus === "active" && <button onClick={onContinueTutorial}>Continue quick start</button>}
+        </>}
+        {tab === "Usage" && <Usage data={usageData} settings={settings} onSave={onSave}/>}
         {tab === "Connection" && (
           <Connection {...{ connection, setConnection, run, busy }} />
         )}
@@ -385,8 +401,12 @@ function SettingsPanel({
                 </dd>
               </div>
               <div>
-                <dt>Notes and references</dt>
-                <dd>Local files</dd>
+                <dt>Notes and usage</dt>
+                <dd>{desktop ? "OS-encrypted on this device" : "Browser-local preview"}</dd>
+              </div>
+              <div>
+                <dt>Original notebook</dt>
+                <dd>Any pre-upgrade notes.json is kept unchanged for recovery</dd>
               </div>
               <div>
                 <dt>Telemetry</dt>
@@ -416,141 +436,6 @@ function SettingsPanel({
   );
 }
 
-function Notebook({ notes, setNotes, run }) {
-  const [selected, setSelected] = useState(null);
-  const [form, setForm] = useState({
-    title: "",
-    source: "",
-    body: "",
-    status: "observation",
-  });
-  const [dirty, setDirty] = useState(false);
-  const choose = (n) => {
-    if (dirty && !window.confirm("Discard the unsaved note changes?")) return;
-    setSelected(n?.id || null);
-    setForm(n || { title: "", source: "", body: "", status: "observation" });
-    setDirty(false);
-  };
-  const edit = (key, value) => {
-    setForm({ ...form, [key]: value });
-    setDirty(true);
-  };
-  return (
-    <section className="page">
-      <header className="page-header">
-        <div>
-          <p className="eyebrow">LOCAL KNOWLEDGE</p>
-          <h1>Learning notebook</h1>
-        </div>
-        <button onClick={() => choose(null)}>
-          <Plus size={16} />
-          New note
-        </button>
-      </header>
-      <div className="notebook-grid">
-        <aside className="note-list">
-          <p className="eyebrow">{notes.length} SAVED NOTES</p>
-          {notes.map((n) => (
-            <button
-              className={selected === n.id ? "selected" : ""}
-              key={n.id}
-              onClick={() => choose(n)}
-            >
-              <strong>{n.title}</strong>
-              <small>
-                {n.status} / {new Date(n.updatedAt).toLocaleDateString()}
-              </small>
-            </button>
-          ))}
-          {!notes.length && <p className="muted">No notes yet.</p>}
-          <div className="note-guideline">
-            <BookOpen size={20} />
-            <h3>API reference</h3>
-            <p className="muted">
-              Full specification pending. Preliminary observations are saved in
-              the project knowledge folder.
-            </p>
-          </div>
-        </aside>
-        <form
-          className="note-editor"
-          onSubmit={(e) => {
-            e.preventDefault();
-            run(async () => {
-              const result = await api["save-note"]({ ...form, id: selected });
-              setNotes(result);
-              const saved = selected
-                ? result.find((n) => n.id === selected)
-                : result[0];
-              setSelected(saved.id);
-              setForm(saved);
-              setDirty(false);
-            });
-          }}
-        >
-          <label className="field">
-            Title
-            <input
-              required
-              maxLength="160"
-              value={form.title}
-              onChange={(e) => edit("title", e.target.value)}
-            />
-          </label>
-          <div className="form-grid">
-            <label className="field">
-              Evidence level
-              <select
-                value={form.status}
-                onChange={(e) => edit("status", e.target.value)}
-              >
-                <option value="observation">Observation</option>
-                <option value="hypothesis">Hypothesis</option>
-                <option value="verified">Verified</option>
-              </select>
-            </label>
-            <label className="field">
-              Source or API reference
-              <input
-                maxLength="2000"
-                value={form.source}
-                onChange={(e) => edit("source", e.target.value)}
-                placeholder="URL or #/components/schemas/..."
-              />
-            </label>
-          </div>
-          <label className="field">
-            Note
-            <textarea
-              rows="12"
-              maxLength="20000"
-              value={form.body}
-              onChange={(e) => edit("body", e.target.value)}
-              placeholder="Observed facts, interpretation, and next verification"
-            />
-          </label>
-          <div className="actions">
-            <button
-              className="primary"
-              type="submit"
-              disabled={!form.title.trim() || !dirty}
-            >
-              Save note
-            </button>
-            <span className="muted">
-              {dirty
-                ? "Unsaved changes"
-                : selected
-                  ? "Saved locally"
-                  : "Local only"}
-            </span>
-          </div>
-        </form>
-      </div>
-    </section>
-  );
-}
-
 export default function App() {
   const [settings, setSettings] = useState(DEFAULT_SETTINGS);
   const [connection, setConnection] = useState({ imported: false });
@@ -558,6 +443,9 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [view, setView] = useState("chat");
   const [showSettings, setShowSettings] = useState(false);
+  const [settingsTab, setSettingsTab] = useState("Appearance");
+  const [showTutorial, setShowTutorial] = useState(false);
+  const [usageData, setUsageData] = useState(null);
   const [showWelcome, setShowWelcome] = useState(false);
   const [setupStep, setSetupStep] = useState(1);
   const [setupName, setSetupName] = useState("");
@@ -573,7 +461,8 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [toast, setToast] = useState("");
-  const [notes, setNotes] = useState([]);
+  const [notes, setNotes] = useState(null);
+  const notesRef = useRef(null);
   const [library, setLibrary] = useState(null);
   const [chatDialog, setChatDialog] = useState(null);
   const workspaceRef = useRef(null);
@@ -606,6 +495,11 @@ export default function App() {
     }
     return next;
   };
+  const acceptNotes = next => {
+    if (!notesRef.current || next.revision >= notesRef.current.revision) {notesRef.current = next; setNotes(next);}
+    return next;
+  };
+  const notesAction = async action => acceptNotes(await api["notes-action"](action));
   const refreshInvestigations = async () => {
     const state = await api.modules();
     setJobs(state.jobs);
@@ -622,6 +516,13 @@ export default function App() {
     void poll();
     const timer = setInterval(poll, 1500);
     return () => { live = false; clearInterval(timer); };
+  }, []);
+  useEffect(() => {
+    let live = true;
+    const refresh = async () => {try {const data = await api.usage(); if (live) setUsageData(data);}catch(e){if(live) setError(e.message);}};
+    void refresh();
+    const timer = setInterval(refresh, 10000);
+    return () => {live = false; clearInterval(timer);};
   }, []);
   const mutateWorkspace = async (action) =>
     acceptWorkspace(await api["workspace-action"](action));
@@ -659,7 +560,8 @@ export default function App() {
         if (!live) return;
         setSettings(data.settings);
         setConnection(data.connection);
-        setNotes(data.notes);
+        acceptNotes(data.notes);
+        setUsageData(data.usage);
         setDesktop(data.desktop);
         acceptWorkspace(data.workspace);
         setShowWelcome(!data.settings.onboarded);
@@ -718,6 +620,11 @@ export default function App() {
   };
   const safeSave = (next) => {
     void saveSettings(next).catch(() => {});
+  };
+  const openSettings = tab => {setSettingsTab(tab);setShowSettings(true);};
+  const replayTutorial = () => {
+    safeSave({...settings,tutorialStatus:"active",tutorialStep:0});
+    setShowSettings(false);setShowTutorial(true);
   };
   const send = async (e) => {
     e?.preventDefault();
@@ -788,6 +695,20 @@ export default function App() {
       await mutateWorkspace({ type: "select-chat", id });
       switchView("chat");
     });
+  const attachNote = async (note, target) => {
+    await draftQueue.current;
+    const text = `\n\n[Attached note: ${note.title || "Untitled note"}]\n${note.body}\n[End of attached note]`;
+    const existing = target === "new" ? null : workspaceRef.current?.chats.find(c=>c.id===target);
+    if (target !== "new" && !existing) throw new Error("Chat not found.");
+    if (existing?.pending) throw new Error("Wait for this chat's response before attaching a note.");
+    const draft = `${existing?.draft || ""}${text}`.trim();
+    if (draft.length > 40000) throw new Error("This note is too large for the chat draft. Attach a shorter note.");
+    const next = await mutateWorkspace(target === "new" ? {type:"create-chat",projectId:null} : {type:"select-chat",id:target});
+    const id = next.activeChatId;
+    await mutateWorkspace({type:"save-draft",id,draft});
+    setDrafts(old=>({...old,[id]:draft}));
+    switchView("chat");setToast("Note added to draft. Nothing sent.");
+  };
   const openEvidence = (href) => run(async () => {
     const match = /^#evidence-([a-f0-9-]{36})-(E[0-9]+)$/.exec(href || "");
     const job = match && jobs.find(j => j.id === match[1] && (j.chatId === activeChat?.id || j.children.some(c => c.chatId === activeChat?.id)));
@@ -829,7 +750,7 @@ export default function App() {
                 {[
                   ["chat", MessageSquare, "Claude"],
                   ["library", BookOpen, "API library"],
-                  ["notes", NotebookPen, "Learning notebook"],
+                  ["notes", NotebookPen, "Notes"],
                 ].map(([id, Icon, label]) => (
                   <React.Fragment key={id}>
                     <button
@@ -873,6 +794,7 @@ export default function App() {
               </div>
             </div>
             <div className="sidebar-bottom">
+              <UsageBadge data={usageData} settings={settings} onClick={()=>openSettings("Usage")}/>
               <div className="connection-dot">
                 <span className={connection.imported ? "connected" : ""} />
                 {connection.imported
@@ -883,7 +805,7 @@ export default function App() {
                 className="profile-button"
                 aria-label="Settings"
                 title="Settings"
-                onClick={() => setShowSettings(true)}
+                onClick={() => openSettings("Appearance")}
               >
                 <span className="avatar">
                   {settings.name ? settings.name[0].toUpperCase() : "U"}
@@ -915,7 +837,7 @@ export default function App() {
                   ? "Claude"
                   : view === "library"
                     ? "API library"
-                    : "Learning notebook"}
+                    : "Notes"}
               </strong>
             </div>
             <div className="topbar-access">
@@ -934,13 +856,12 @@ export default function App() {
               </IconButton>
             </div>
           )}
+          {!loading && notes && <div hidden={view !== "notes"} className="notes-surface"><Notes data={notes} onAction={notesAction} onAttach={attachNote} Modal={Modal} chats={workspace?.chats || []}/></div>}
           {loading ? (
             <div className="loading">Opening workspace...</div>
           ) : view === "library" ? (
             <Library {...{ library, setLibrary, run }} />
-          ) : view === "notes" ? (
-            <Notebook {...{ notes, setNotes, run }} />
-          ) : (
+          ) : view === "notes" ? null : (
             <section className="chat-page">
               <div className="chat-header">
                 <div>
@@ -1107,19 +1028,20 @@ export default function App() {
                     maxLength="40000"
                     placeholder={
                       connection.imported
-                        ? "Ask about Storage, Storage, or the evidence in front of you..."
+                        ? "Message Claude..."
                         : "Connect your own Claude access in Settings to begin..."
                     }
                     disabled={Boolean(pending) || !activeChat}
                     onKeyDown={(e) => {
-                      if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-                        e.preventDefault();
-                        void send();
-                      }
+                      if (!shouldSendOnEnter(e, settings.enterBehavior)) return;
+                      e.preventDefault();
+                      if (!e.repeat) void send();
                     }}
                   />
                   <div className="composer-bottom">
-                    <span>{input.length.toLocaleString()} / 40,000</span>
+                    <span>
+                      {input.length.toLocaleString()} / 40,000
+                    </span>
                     {busy ? (
                       <IconButton
                         type="button"
@@ -1180,11 +1102,22 @@ export default function App() {
         </Modal>}
         {showSettings && (
           <SettingsPanel
+            key={settingsTab}
             {...{ settings, connection, setConnection, run, busy, desktop }}
+            initialTab={settingsTab}
+            usageData={usageData}
+            onTutorial={replayTutorial}
+            onContinueTutorial={()=>{setShowSettings(false);setShowTutorial(true);}}
+            onResetTutorial={()=>{safeSave({...settings,tutorialStatus:"new",tutorialStep:0});setToast("Tutorial progress reset");}}
             onSave={safeSave}
             onClose={() => setShowSettings(false)}
           />
         )}
+        {showTutorial && !showWelcome && !showSettings && <QuickStart settings={settings} onSave={safeSave} onClose={()=>setShowTutorial(false)} Modal={Modal} onOpen={target=>{
+          setShowTutorial(false);
+          if (["chat","notes"].includes(target)) switchView(target);
+          else openSettings(target);
+        }}/>}
         {showWelcome && !loading && (
           <Modal title="Set up your workspace" className="welcome-modal">
             <div className="setup-progress">
@@ -1253,6 +1186,7 @@ export default function App() {
                       run(async () => {
                         await saveSettings({ ...settings, onboarded: true });
                         setShowWelcome(false);
+                        if (settings.tutorialStatus === "new") setShowTutorial(true);
                       })
                     }
                   >

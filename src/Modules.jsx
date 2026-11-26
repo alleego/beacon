@@ -29,6 +29,7 @@ function EvidenceBrowser({ records }) {
 }
 
 export function ModuleAccess({ module: m, refresh, run, compact = false }) {
+  const local = m.capability === 'local-node-worker';
   const [checking, setChecking] = useState(false);
   const [now, setNow] = useState(Date.now());
   useEffect(() => { const timer = setInterval(() => setNow(Date.now()), 15000); return () => clearInterval(timer); }, []);
@@ -36,7 +37,7 @@ export function ModuleAccess({ module: m, refresh, run, compact = false }) {
   const a = saved.state === 'reachable' && now - Date.parse(saved.checkedAt) > 120000
     ? {...saved, state:'stale', message:'Last check succeeded. Check again to verify current access.'} : saved;
   const busy = checking || a.state === "checking";
-  const configured = m.enabled && !!m.connection;
+  const configured = m.enabled && (local ? m.setupComplete && m.supported : !!m.connection);
   const labels = {unchecked:"Not checked", checking:"Checking…", reachable:"Reachable", stale:"Check again",
     unreachable:"Unreachable", "auth-required":"Sign-in needed", "host-key":"Verify host key", failed:"Check failed", cancelled:"Not checked"};
   const check = () => run(async () => {
@@ -44,31 +45,48 @@ export function ModuleAccess({ module: m, refresh, run, compact = false }) {
     try { await api["module-access-check"]({id:m.id}); await refresh(); }
     finally { setChecking(false); }
   });
-  const detail = `${a.message || 'Check the saved SSH connection.'}${a.checkedAt ? ` Last checked: ${new Date(a.checkedAt).toLocaleString()}.` : ''}`;
+  const detail = `${a.message || (local ? 'Check local runtime availability.' : 'Check the saved SSH connection.')}${a.checkedAt ? ` Last checked: ${new Date(a.checkedAt).toLocaleString()}.` : ''}`;
   return <div className={`module-access ${compact ? 'compact' : ''}`}>
     <button type="button" disabled={!configured || busy} onClick={check}
       className={`access-check ${a.state === 'reachable' && !busy ? 'reachable' : ''}`}
       aria-label={`Check access for ${m.name}`} title={`${m.name}. ${detail}`}>
       <span className={busy ? 'progress-ring' : 'access-dot'} aria-hidden="true" />
-      {compact ? m.name : 'Remote access'}: {busy ? 'Checking…' : !configured ? 'Set up connection' : labels[a.state] || 'Not checked'}
+      {compact ? m.name : local ? 'Local access' : 'Remote access'}: {busy ? 'Checking…' : !configured ? 'Setup required' : labels[a.state] || 'Not checked'}
     </button>
-    {!compact && <p className="muted" role="status">{detail}<br />Checks the saved connection without reading case files or calling the model. Click to check again.</p>}
+    {!compact && <p className="muted" role="status">{detail}</p>}
     {compact && a.checkedAt && <small title={detail}>Checked {new Date(a.checkedAt).toLocaleTimeString()}</small>}
   </div>;
 }
 
 function ModuleCard({ module: m, refresh, run }) {
+  const local = m.capability === 'local-node-worker';
+  const [steps, setSteps] = useState({});
   const [connection, setConnection] = useState(m.connection || { host: "", user: "", relay: "", config: "" });
   const edit = (key, value) => setConnection(c => ({ ...c, [key]: value }));
   return <article className="module-card">
     <div className="module-heading"><h3>{m.name} <small>{m.version}</small></h3>
-      <label><input type="checkbox" checked={m.enabled} onChange={e => run(async () => {
+      <label><input type="checkbox" checked={m.enabled} disabled={local && (!m.supported || !m.setupComplete)} onChange={e => run(async () => {
         await api["module-configure"]({ id: m.id, enabled: e.target.checked }); await refresh();
       })} /> Enabled</label></div>
     <p>{m.description}</p>
+    {local && <section aria-label="Module setup">
+      {!m.supported && <p role="status">Available on macOS only.</p>}
+      <details open={!m.setupComplete}>
+        <summary>{m.setup?.title || 'Module setup'}</summary>
+        {m.setup?.steps.map((step, index) => <label className="field" key={index}>
+          <span><input type="checkbox" checked={m.setupComplete || !!steps[index]} disabled={m.setupComplete || !m.supported}
+            onChange={e => setSteps(s => ({...s, [index]: e.target.checked}))} /> {step}</span>
+        </label>)}
+        {!m.setupComplete && <button type="button" disabled={!m.supported || !m.setup?.steps.every((_, i) => steps[i])}
+          onClick={() => run(async () => {
+            await api['module-configure']({id: m.id, setupComplete: true, enabled: true}); await refresh();
+          })}>Finish setup</button>}
+        {m.setupComplete && <p role="status">Setup confirmed</p>}
+      </details>
+    </section>}
     <ModuleAccess module={m} refresh={refresh} run={run} />
     <details><summary>Package fingerprint</summary><code className="fingerprint">{m.hash}</code></details>
-    <form onSubmit={e => { e.preventDefault(); run(async () => {
+    {!local && <form onSubmit={e => { e.preventDefault(); run(async () => {
       await api["module-configure"]({id: m.id, connection}); await refresh();
     }); }}>
       <p><strong>{connection.relay ? "Connection through another computer" : "Direct connection (default)"}</strong><br />
@@ -82,7 +100,7 @@ function ModuleCard({ module: m, refresh, run }) {
       <label className="field">Local SSH config file (optional)<input value={connection.config} onChange={e => edit("config", e.target.value)} /></label>
       <p className="muted">Connect your VPN and sign in manually first. SSH host keys must already be trusted. Passwords and private keys are never entered here.</p>
       <button type="submit">Save connection</button>
-    </form>
+    </form>}
   </article>;
 }
 
@@ -170,7 +188,7 @@ export function Investigations({ jobs, chatId, selectChat, run, refresh, Modal }
           {active ? <button onClick={() => action("investigation-stop", {id: j.id})}>Stop investigation</button> :
             j.status !== "ready" && j.status !== "awaiting-selection" && <button onClick={() => action("investigation-resume", {id: j.id})}>Resume unfinished work</button>}
           {!active && j.stale && <button onClick={() => action("investigation-resume", {id: j.id, review: true})}>Refresh master review</button>}
-          <button disabled={!j.evidenceCount} onClick={() => run(async () => setEvidence(await api["investigation-evidence"]({id: j.id})))}>Evidence ({j.evidenceCount})</button>
+          <button disabled={!j.evidenceCount && !j.previewCount} onClick={() => run(async () => setEvidence(await api["investigation-evidence"]({id: j.id})))}>{j.evidenceCount ? `Evidence (${j.evidenceCount})` : j.previewCount ? 'Preview captured text' : 'Evidence (0)'}</button>
           <button onClick={() => run(async () => api.copy(await api["investigation-handoff"]({id: j.id})))}>Copy handoff</button>
           <button onClick={() => run(async () => api["export-chat"](await api["investigation-handoff"]({id: j.id})))}>Export handoff</button>
         </div>
