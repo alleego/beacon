@@ -7,6 +7,12 @@ export const DEFAULT_SETTINGS = Object.freeze({
   lineHeight: 1.65,
   rememberWindow: true,
   onboarded: false,
+  enterBehavior: "newline",
+  usagePeriod: "month",
+  usageFrom: "",
+  usageTo: "",
+  tutorialStatus: "new",
+  tutorialStep: 0,
 });
 export const PROVIDER = Object.freeze({
   model: "claude-sonnet-4-6",
@@ -39,6 +45,12 @@ export function validateSettings(input) {
     throw new Error("Text size must be between 13 and 20.");
   if (![1.45, 1.65, 1.85].includes(v.lineHeight))
     throw new Error("Choose an available line spacing.");
+  if (!["newline", "send"].includes(v.enterBehavior)) throw new Error("Choose an Enter behavior.");
+  if (!["month", "14days", "30days", "previous", "custom"].includes(v.usagePeriod)) throw new Error("Choose a usage period.");
+  for (const key of ["usageFrom", "usageTo"]) {
+    if (typeof v[key] !== "string" || (v[key] && !/^\d{4}-\d{2}-\d{2}$/.test(v[key]))) throw new Error("Choose a valid usage date.");
+  }
+  if (!["new", "active", "dismissed", "complete"].includes(v.tutorialStatus) || !Number.isInteger(v.tutorialStep) || v.tutorialStep < 0 || v.tutorialStep > 4) throw new Error("Invalid quick-start progress.");
   return {
     name: v.name.trim(),
     theme: v.theme,
@@ -48,7 +60,20 @@ export function validateSettings(input) {
     lineHeight: v.lineHeight,
     rememberWindow: Boolean(v.rememberWindow),
     onboarded: Boolean(v.onboarded),
+    enterBehavior: v.enterBehavior,
+    usagePeriod: v.usagePeriod,
+    usageFrom: v.usageFrom,
+    usageTo: v.usageTo,
+    tutorialStatus: v.tutorialStatus,
+    tutorialStep: v.tutorialStep,
   };
+}
+
+export function shouldSendOnEnter(event, behavior) {
+  const native = event.nativeEvent || event;
+  return event.key === "Enter" && !event.shiftKey && !event.altKey &&
+    !native.isComposing && native.keyCode !== 229 &&
+    (behavior === "send" || event.ctrlKey || event.metaKey);
 }
 
 export function validateMessages(messages) {
