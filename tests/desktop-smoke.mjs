@@ -49,6 +49,7 @@ try {
   await page
     .getByRole("button", { name: "Set up Claude later", exact: true })
     .click();
+  await page.getByRole("button", {name:"Skip",exact:true}).click();
   await page
     .getByRole("heading", { name: "What are we working on?" })
     .waitFor();
@@ -101,14 +102,14 @@ try {
   await page.getByRole("button", { name: "Done", exact: true }).click();
   assert.equal(await page.locator("html").getAttribute("data-theme"), "light");
   await page
-    .getByRole("button", { name: "Learning notebook", exact: true })
+    .getByRole("button", { name: "Notes", exact: true })
     .click();
-  await page.getByLabel("Title", { exact: true }).fill("Test-only observation");
+  await page.getByRole("button",{name:"New note",exact:true}).first().click();
+  await page.getByLabel("Note title", { exact: true }).fill("Test-only observation");
   await page
-    .getByLabel("Note", { exact: true })
+    .getByLabel("Note body", { exact: true })
     .fill("This is a synthetic local test, not customer information.");
-  await page.getByRole("button", { name: "Save note", exact: true }).click();
-  await page.getByText("Saved locally", { exact: true }).waitFor();
+  await page.waitForFunction(async()=> (await window.workTeam.notes()).notes[0]?.body.includes("synthetic local test"));
   await page.getByRole("button", { name: /^API library/ }).click();
   await page.getByText("Raw specification pending", { exact: true }).waitFor();
   const fixture = path.join(output, "test-only-openapi.json");
@@ -206,7 +207,7 @@ try {
   const bootstrap = await page.evaluate(() => window.workTeam.bootstrap());
   assert.equal(bootstrap.connection.imported, false);
   assert.equal(bootstrap.settings.name, "Test Reviewer");
-  assert.equal(bootstrap.notes.length, 1);
+  assert.equal(bootstrap.notes.notes.length, 1);
   assert.equal(await page.evaluate(() => typeof window.require), "undefined");
   assert.equal(await page.evaluate(() => typeof window.process), "undefined");
   await assert.rejects(
@@ -315,7 +316,7 @@ try {
     "light",
   );
   const after = await restored.evaluate(() => window.workTeam.bootstrap());
-  assert.equal(after.notes.length, 1);
+  assert.equal(after.notes.notes.length, 1);
   assert.equal(after.connection.imported, true);
   assert.equal(after.connection.project, "work-team-test");
   await restored.evaluate(() => window.workTeam["remove-credential"]());

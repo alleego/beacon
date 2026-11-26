@@ -137,6 +137,24 @@ test("all evidence records reach the model even when the first is large", () => 
   assert.ok(JSON.parse(result).every(e => e.contextTruncated && e.text.length > 0));
 });
 
+test("preview evidence is local until explicit source selection", async () => {
+  let calls=0;
+  const source={id:'c'.repeat(16),label:'Preview'};
+  const evidence=[{id:'E001',topic:'inventory',source:'/synthetic',text:'PRIVATE-PREVIEW-FIXTURE',collectedAt:'2026-01-01'}];
+  const f=await fixture({ask:async()=>{calls++;return response;},collect:async(_m,input)=>input.sourceId
+    ? {sources:[source],selectedSource:source,evidence}
+    : {sources:[source],selectionRequired:true,preview:evidence}});
+  const id=await f.engine.start(f.chatId,{moduleId:pack.id,target:'00123456',depth:'quick'});
+  await f.engine.resume(id);
+  const paused=await done(f.engine,id);
+  assert.equal(paused.status,'awaiting-selection'); assert.equal(paused.evidenceCount,0); assert.equal(paused.previewCount,1);
+  assert.equal(calls,0); assert.equal((await f.engine.evidence(id))[0].text,'PRIVATE-PREVIEW-FIXTURE');
+  assert.ok(!(await f.engine.context(f.chatId)).includes('PRIVATE-PREVIEW-FIXTURE'));
+  assert.ok(!JSON.stringify(await f.engine.snapshot()).includes('PRIVATE-PREVIEW-FIXTURE'));
+  await f.engine.resume(id,false,source.id);
+  assert.equal((await done(f.engine,id)).status,'ready'); assert.equal(calls,2);
+});
+
 test("access checks deduplicate, expire, and are invalidated by connection edits or restart", async () => {
   let count=0, release;
   const f=await fixture({probe:async (_c,signal)=>{

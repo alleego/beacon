@@ -93,6 +93,7 @@ try {
   await page
     .getByRole("button", { name: "Set up Claude later", exact: true })
     .click();
+  await page.getByRole("button", {name:"Skip",exact:true}).click();
   await createProject("Storage review");
   const projectId = (await state()).projects[0].id;
   await page
@@ -208,7 +209,10 @@ try {
     "ALPHA draft evidence",
   );
   await saveDraft("ALPHA question");
-  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  await page.getByRole("textbox",{name:"Message Claude",exact:true}).press("Enter");
+  assert.equal((await state()).chats.find(c=>c.id===alpha).messages.length,0);
+  await saveDraft("ALPHA question");
+  await page.getByRole("textbox",{name:"Message Claude",exact:true}).press("Control+Enter");
   await page.getByText("Waiting for Claude...", { exact: true }).waitFor();
   await openChat("Filesystem follow-up");
   assert.equal(
@@ -241,13 +245,20 @@ try {
     "Synthetic reply 1",
   );
   await saveDraft("BETA question");
-  await page.getByRole("button", { name: "Send message", exact: true }).click();
+  await page.getByRole("button",{name:"Settings",exact:true}).click();
+  await page.getByRole("tab",{name:"Behavior",exact:true}).click();
+  await page.getByLabel("Enter key",{exact:true}).selectOption("send");
+  await page.getByRole("button",{name:"Done",exact:true}).click();
+  await page.getByRole("textbox",{name:"Message Claude",exact:true}).press("Enter");
   await page.getByText("Synthetic reply 2", { exact: true }).waitFor();
   await openChat("Disk investigation");
   await saveDraft("ALPHA followup");
   await page.getByRole("button", { name: "Send message", exact: true }).click();
   await page.getByText("Synthetic reply 3", { exact: true }).waitFor();
   const requests = await app.evaluate(() => globalThis.__providerRequests);
+  const recordedUsage = await page.evaluate(()=>window.workTeam.usage());
+  assert.equal(recordedUsage.events.filter(e=>e.status==="reported").length,3);
+  assert.equal(recordedUsage.events.reduce((n,e)=>n+(e.input||0)+(e.output||0),0),21);
   assert.deepEqual(
     requests.map((messages) => messages.map((m) => m.content)),
     [
